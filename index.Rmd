@@ -1,0 +1,69 @@
+---
+title: "Practical Machine Learning Course Project"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(randomForest)
+```
+
+## Summary
+
+Using a time series of biometric-sensor data (19,622 training observations of about 150 variables) taken while people performed physical actions that fall into 5 categories (A,B,C,D,E), we attempt to predict the category of action that generated each of 20 new sensor-data points (testing data).  A random-forest model proves quite adept at predicting the correct category after a decision tree is found inadequately accurate.
+
+## Uploading and Cleaning
+
+Most of the variables are numerical (angles, accelerations etc.), so I don't want to bring them in as factors (see code below) if they happen to have non-nummeric entries such as an empty character ("") or #div/0 and such.  I make sure the training data are order of time initially, so the k-fold cross-validation we employ later will still create the necessary contiguous chunks in time.  I then form the input matrix (x) by removing the first few columns, which identify things (such as participant name, time stamp) that are certainly not related what action he/she is performing.  I also remove the outcome column (the last one, 160) and assign it to y (categories as factor).  Next the whole data frame (which is full of columns of characters) gets converted to numerics (which turns remaining characters into NAs).  
+
+Finally, the columns that are all numbers (i.e. contain no NAs) are selected, leaving 52 predictors.  This leaves out several groups of columns that only have one numeric entry for each sliding window in time (0.5 to 2.5 seconds, which could encompass dozens of observations each), a statistic like mean or max for that window.  I do this because a) the test data we have happens to contain only isolated points with no summary entries.  I don't make a model to predict based on these values because the test data are devoid of them. And b) the caret train function cannot have NAs in the input.  I would have to throw out the rows without summary entries to include the columns that contain summary entries.
+
+The authors of the paper seem to take this approach and used the summary entries for windows as the input variables for training their models.  They could then determine which of these (a group of 17) had the most predictive value and determined the best time window size to use as well.
+
+```{r upload, warning=FALSE}
+
+trainurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(trainurl, destfile = "pmltrain.csv", method = "curl")
+rm(trainurl)
+testurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(testurl, destfile = "pmltest.csv", method = "curl")
+rm(testurl)
+train <- read.csv("pmltrain.csv", stringsAsFactors = FALSE)
+test <- read.csv("pmltest.csv", stringsAsFactors = FALSE)
+train <- train[order(train$cvtd_timestamp),]
+y <- as.factor(train[,160])
+x <- train[,8:159]
+x <- as.data.frame(sapply(x, as.numeric))
+cs <- colSums(is.na(x))
+index <- cs == 0
+x <- x[,index]
+```
+
+## Training
+
+As the data looked highly disparate in terms of scale and distributions (see boxplot below), I started with the simplest non-linear, non-parametric decision tree.  The accuracy, however, was disappointing at about 50% - and this was in the training set.  Out-of-sample error would only be worse, so I discard this model as not useful for prediction.  
+
+```{r rpart, cache=TRUE}
+boxplot(x)
+set.seed(522)  ##for reproducibility
+rp <- train(x,y,method = "rpart")
+pred <- predict(rp, data = train)
+confusionMatrix(pred, y)
+```
+
+Next I chose a more powerful random-forest extension of the idea of trees (bootstrapping 500 of them in fact).  To save processing time, cross-validation is done via 3-fold subsampling (rather than the defaut bootstrapping, which would underestimate out-of-sample error and would not work well with a time series that has not been sliced).  After training the model on the training data (input data x and output data y), the model is applied to the test input data, outputting its 20 predictions.  The model is also printed to show the average accuracy acheived in cross validation: 0.993 with the optimal mtry (the number of variables randomly sampled as candidates at each split).  The model rf therefore should have out of sample error (defined as 1 minus accuracy) of around 0.007 or 0.7%.  It will get all 20 test cases right about 87% of the time (0.993^20).
+
+As it turns out a boosting model (gbm, code not shown) would have accuracy of only about 0.97.  The gbm model (with seed 522) gets all the quiz questions right, but this would happen only about 57% of the time, depending on the test data.
+
+We could further increase the accuracy of the random forest model by combining its predictions with those of other models (ensembling) or by using various model predictions as the input for a meta-model, trained on the test data (stacking, would require validation data).
+
+```{r rf, cache=TRUE}
+set.seed(522)
+cont <- trainControl(method = "cv", number = 3)
+rf <- train(x, y, method = "rf", trControl = cont)
+predict(rf, newdata = test)
+rf
+```
+
+We can see that this estimate is a bit biased due to the small size of k by looking at out-of-bag (OOB estimate of error rate, calculated while constructing the random forest), which was `r round(rf$finalModel$err.rate[[500,1]]*100,2)`%.
